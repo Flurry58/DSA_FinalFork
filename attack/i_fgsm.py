@@ -1,24 +1,30 @@
 from typing import Union
+
 from typing_extensions import Literal
+
 from models.base import Model, ModelList
-from utils.distance import linf, get_distance
+from utils.distance import get_distance, linf
+
 from .base import BaseGradientDescent
 
 
+# This is just IFGSM and setting up the attack. From what it looks like this is identical
+# to the IFGSM we went over in class
 class IFGSM(BaseGradientDescent):
     distance = linf
     random_start = False
 
-    def __init__(self,
-                 *,
-                 local_models: Model = None,
-                 tensorboard: Union[Literal[False], None, str] = False,
-                 constraint: Union[Literal["linf"], Literal["l2"]] = "l2",
-                 epsilon: float = 4.6,
-                 steps=10,
-                 alpha: float = None,
-                 **kwargs,
-                 ) -> None:
+    def __init__(
+        self,
+        *,
+        local_models: Model = None,
+        tensorboard: Union[Literal[False], None, str] = False,
+        constraint: Union[Literal["linf"], Literal["l2"]] = "l2",
+        epsilon: float = 4.6,
+        steps=10,
+        alpha: float = None,
+        **kwargs,
+    ) -> None:
         self.local_models = local_models
         self.tensorboard = tensorboard
         self.constraint = constraint
@@ -26,7 +32,12 @@ class IFGSM(BaseGradientDescent):
         self.steps = steps
         self.distance = get_distance(constraint)
         self.alpha = epsilon / steps if alpha is None else alpha
-        super().__init__(abs_stepsize=self.alpha, steps=steps, random_start=self.random_start, epsilon=self.epsilon)
+        super().__init__(
+            abs_stepsize=self.alpha,
+            steps=steps,
+            random_start=self.random_start,
+            epsilon=self.epsilon,
+        )
 
 
 class FGSM(IFGSM):

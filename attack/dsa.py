@@ -1,32 +1,35 @@
-from typing import Any, Optional, Union, Literal
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 import torch
+
 from models.base import Model, ModelList
-from utils.distance import get_distance, l2, flatten
+from utils.distance import flatten, get_distance, l2
 from utils.result import Result
 
+from .base import MinimizationAttack, T, get_is_adversarial, get_random_start
 from .mi_fgsm import MIFGSM
-from .base import get_is_adversarial, get_random_start, MinimizationAttack, T
-from .utils import raise_if_kwargs, get_criterion
+from .utils import get_criterion, raise_if_kwargs
 
 
 class DSA(MinimizationAttack):
     distance = l2
     wba = MIFGSM()  # white box attack
 
-    def __init__(self,
-                 local_models: Model | ModelList | None = None,
-                 momentum: float = 1,
-                 constraint: Union[Literal["linf"], Literal["l2"]] = "l2",
-                 epsilon: float = 1.75,
-                 wba_steps: int = 100,
-                 bba_steps: int = 100,
-                 wba_iters: int = 10,  # white box attack inner steps
-                 random_starting: bool = True,
-                 budget: int = 4000,
-                 **kwargs
-                 ) -> None:
+    # Initialize the model
+    def __init__(
+        self,
+        local_models: Model | ModelList | None = None,
+        momentum: float = 1,
+        constraint: Union[Literal["linf"], Literal["l2"]] = "l2",
+        epsilon: float = 1.75,
+        wba_steps: int = 100,
+        bba_steps: int = 100,
+        wba_iters: int = 10,  # white box attack inner steps
+        random_starting: bool = True,
+        budget: int = 4000,
+        **kwargs,
+    ) -> None:
         self.momentum = momentum
         self.constraint = constraint
         self.epsilon = epsilon
@@ -35,21 +38,28 @@ class DSA(MinimizationAttack):
         self.distance = get_distance(constraint)
         self.alpha = epsilon / wba_iters
         self.budget = budget
-        self.local_models = local_models if isinstance(local_models, ModelList) else [local_models]
+        self.local_models = (
+            local_models if isinstance(local_models, ModelList) else [local_models]
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.random_starting = random_starting
-        self.wba.__init__(constraint=self.constraint, epsilon=epsilon, local_models=self.local_models[0])  # reinit
+        self.wba.__init__(
+            constraint=self.constraint,
+            epsilon=epsilon,
+            local_models=self.local_models[0],
+        )  # reinit
         self.input_transform = AdaptiveChoose([self.random_transform])
         self.model_generator = AdaptiveChoose(self.local_models)
 
-    def run(self,
-            model: Model,
-            inputs: T,
-            criterion: Any,
-            *,
-            starting_points: Optional[T] = None,
-            **kwargs: Any
-            ):
+    def run(
+        self,
+        model: Model,
+        inputs: T,
+        criterion: Any,
+        *,
+        starting_points: Optional[T] = None,
+        **kwargs: Any,
+    ):
         raise_if_kwargs(kwargs)
         originals = inputs.clone()
         criterion = get_criterion(criterion)
@@ -64,7 +74,11 @@ class DSA(MinimizationAttack):
         x_adv = starting_points.clone()
         cur_dist = self.distance(originals, x_adv)
         candidate_distance = cur_dist
-        self.result.update(torch.zeros(len(cur_dist)) == 1, is_adversarial.query, cur_dist)
+        self.result.update(
+            torch.zeros(len(cur_dist)) == 1, is_adversarial.query, cur_dist
+        )
+
+        # This is what happens each step
         for i in range(1, self.wba_steps + 1):
             # candidate distance record
             inputs = originals.clone()
@@ -72,18 +86,30 @@ class DSA(MinimizationAttack):
             inputs = inputs.requires_grad_()
 
             for _ in range(len(self.local_models)):
+                # Every step go through the models and get the fitness of each or dist_range
                 # gen various epsilon
-                dist_range = torch.normal(self.epsilon, cur_dist.max().item() - self.epsilon, size=(100,))
-                dist_range = dist_range[(dist_range > self.epsilon / 2) & (dist_range < cur_dist.max().item())]
+                dist_range = torch.normal(
+                    self.epsilon, cur_dist.max().item() - self.epsilon, size=(100,)
+                )
+                dist_range = dist_range[
+                    (dist_range > self.epsilon / 2)
+                    & (dist_range < cur_dist.max().item())
+                ]
                 eps = dist_range[0]
                 local_model = self.model_generator.choose_one()
 
                 # reinit white box attack
-                self.wba.__init__(constraint=self.constraint, epsilon=eps.item(), local_models=local_model)
+                self.wba.__init__(
+                    constraint=self.constraint,
+                    epsilon=eps.item(),
+                    local_models=local_model,
+                )
                 is_adversarial_local = get_is_adversarial(criterion, local_model)
 
                 # gen candidates from local white box attack
-                inputs = self.wba.run(local_model, originals, criterion=criterion, starting_points=inputs)
+                inputs = self.wba.run(
+                    local_model, originals, criterion=criterion, starting_points=inputs
+                )
 
                 if is_adversarial_local(inputs).any():
                     # detach and biased inputs
@@ -101,7 +127,9 @@ class DSA(MinimizationAttack):
                 cur_dist = self.distance(originals, x_adv)
 
                 #  update result
-                self.result.update(cur_dist < self.epsilon, is_adversarial.query, cur_dist)
+                self.result.update(
+                    cur_dist < self.epsilon, is_adversarial.query, cur_dist
+                )
                 if is_adv or self.result.finished:
                     break
             print(f"Dispersed Sampling @step = {i}", self.result)
@@ -110,12 +138,17 @@ class DSA(MinimizationAttack):
 
         return x_adv
 
+    # Random Start, similar to FGSM in this regard
     def random_transform(self, x: T):
         return get_random_start(x, 0.5 * self.epsilon, self.distance.p)
 
 
-class AdaptiveChoose:
+# This part is the part that gets the probability
+# to choose each model based on the models fitness depending on the attack model
+#
 
+
+class AdaptiveChoose:
     def __init__(self, trans_fn, ratio_base=10):
         self.trans_fn = trans_fn
         self.ratio = ratio_base * np.ones(len(trans_fn))
@@ -126,6 +159,7 @@ class AdaptiveChoose:
         return trans_fn(*args, **kwargs)
 
     def choose_one(self):
+        # First get the probability it will be chosen and assign that probability to the model array
         probability = (self.ratio / self.ratio.sum()).cumsum()
         r = np.random.rand()
         self.index = np.nonzero(probability > r)[0][0]
